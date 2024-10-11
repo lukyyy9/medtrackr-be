@@ -1,0 +1,100 @@
+stages:
+  - test-node
+  - sonar
+  - build_docker
+  - deploy_docker
+
+test-node:
+  image: node:20.10.0-alpine
+  stage: test-node
+  script:
+    - npm install
+    - npm run test
+
+build-docker:
+  stage : build_docker
+  tags:
+    - dind
+  image: docker:24.0.2
+  services:
+    - docker:24.0.2-dind
+  script:
+    - cat Dockerfile
+    - echo -n ${CI_REGISTRY_PASSWORD} | docker login ${CI_REGISTRY} -u ${CI_REGISTRY_USER} --password-stdin
+    - docker build . --no-cache=true -f Dockerfile -t aminhelloworld/medtrackr-be:${CI_COMMIT_SHORT_SHA}
+    - docker push aminhelloworld/medtrackr-be:${CI_COMMIT_SHORT_SHA}
+  
+  
+deploy-docker-dev:
+  only:
+    - dev
+  stage : deploy_docker
+  tags:
+    - dind
+  image: docker:24.0.2
+  services:
+    - docker:24.0.2-dind
+  script:
+    ## SETUP SSH
+    - 'command -v ssh-agent >/dev/null || ( apt-get update -y && apt-get install openssh-client -y )'
+    - eval $(ssh-agent -s)
+    - chmod 400 "$SSH_PRIVATE_KEY"
+    - ssh-add "$SSH_PRIVATE_KEY"
+    - mkdir -p ~/.ssh
+    - chmod 700 ~/.ssh
+    - echo -e "Host *\n StrictHostKeyChecking no" > ~/.ssh/config
+
+
+    ## DEPLOY
+    - cat docker-compose.yml
+    - echo -n ${CI_REGISTRY_PASSWORD} | docker login ${CI_REGISTRY} -u ${CI_REGISTRY_USER} --password-stdin
+    - docker -H ssh://root@${HOST_DIST_DEV}  stack rm medtrackr-be-dev
+    - sleep 10
+    - IMAGE_TAG=${CI_COMMIT_SHORT_SHA} NODE_ENV=development NODE_PORT=8081 DB_HOST=${DB_HOST_DEV} DB_DB=${DB_DB_DEV} DB_USER=${DB_USER_DEV} DB_PASSWORD=${DB_PASSWORD_DEV} docker -H ssh://root@${HOST_DIST_DEV} stack deploy medtrackr-be-dev -c docker-compose.yml --with-registry-auth
+    
+  
+deploy-docker-prod:
+  only:
+    - main
+  stage : deploy_docker
+  tags:
+    - dind
+  image: docker:24.0.2
+  services:
+    - docker:24.0.2-dind
+  script:
+    ## SETUP SSH
+    - 'command -v ssh-agent >/dev/null || ( apt-get update -y && apt-get install openssh-client -y )'
+    - eval $(ssh-agent -s)
+    - chmod 400 "$SSH_PRIVATE_KEY"
+    - ssh-add "$SSH_PRIVATE_KEY"
+    - mkdir -p ~/.ssh
+    - chmod 700 ~/.ssh
+    - echo -e "Host *\n StrictHostKeyChecking no" > ~/.ssh/config
+
+
+    ## DEPLOY
+    - cat docker-compose.yml
+    - echo -n ${CI_REGISTRY_PASSWORD} | docker login ${CI_REGISTRY} -u ${CI_REGISTRY_USER} --password-stdin
+    - docker -H ssh://root@${HOST_DIST_PROD}  stack rm medtrackr-be-prod
+    - sleep 10
+    - IMAGE_TAG=${CI_COMMIT_SHORT_SHA} NODE_ENV=production NODE_PORT=8080 DB_HOST=${DB_HOST_PROD} DB_DB=${DB_DB_PROD} DB_USER=${DB_USER_PROD} DB_PASSWORD=${DB_PASSWORD_PROD} docker -H ssh://root@${HOST_DIST_PROD} stack deploy medtrackr-be-prod -c docker-compose.yml --with-registry-auth
+
+    
+sonar:
+  only:
+    - dev
+  stage: sonar
+  image: 
+    name: sonarsource/sonar-scanner-cli:latest
+    entrypoint: [""]
+  variables:
+    SONAR_USER_HOME: "${CI_PROJECT_DIR}/.sonar" 
+    GIT_DEPTH: "0"
+  cache:
+    key: "${CI_JOB_NAME}"
+    paths:
+      - .sonar/cache
+  script:
+    - sonar-scanner -Dsonar.qualitygate.wait=true
+  allow_failure: true
